@@ -1001,6 +1001,12 @@
     saveSession();
     return true;
   }
+  function scrollPageToTop() {
+    try { window.scrollTo(0, 0); } catch (e) {}
+    // モード切り替え後のレイアウト確定でスクロール位置が戻る場合に備え、
+    // 次フレームでもう一度先頭へ合わせる
+    requestAnimationFrame(function () { try { window.scrollTo(0, 0); } catch (e2) {} });
+  }
   function resetWalk() {
     session = defaultSession();
     saveSession();
@@ -1013,6 +1019,8 @@
     lastKept = null; trackBuffer = []; trackInFlight = [];
     liveRoute = null;
     render();
+    // MENU メインへ切り替わった直後に、ページ最上部へ強制スクロールする
+    scrollPageToTop();
     syncMap(true);
   }
 
@@ -1117,9 +1125,16 @@
     var map = mapHandle && mapHandle.getMap ? mapHandle.getMap() : null;
     if (map && dispPosRef) {
       try {
-        // ベーススタイルの再読込などで現在地ソースが消えていたら、
-        // オーバーレイを作り直して重畳も確定し直す
-        if (!map.getSource("route-myloc")) syncMap(true);
+        // ベーススタイルの再読込などでオーバーレイのソースが消えていたら、
+        // オーバーレイを作り直して重畳も確定し直す。対象は現在地だけでなく
+        // ルート線（一周ライン・到達済み・軌跡・次の区間）も含む。
+        var overlayMissing = !map.getSource("route-myloc");
+        if (!overlayMissing) {
+          for (var oi = 0; oi < lastOverlayIds.length; oi++) {
+            if (!map.getSource(lastOverlayIds[oi])) { overlayMissing = true; break; }
+          }
+        }
+        if (overlayMissing) syncMap(true);
         var s1 = map.getSource("route-myloc");
         if (s1) s1.setData(pointOverlay("route-myloc", dispPosRef).data);
         var dh = dispHeadingRef;
@@ -1392,6 +1407,7 @@
          update はオーバーレイの差分適用として自前で実装する        */
   var rawMap = null;
   var adapterOverlayLayers = {}; // overlayId -> [layerId, ...]
+  var lastOverlayIds = []; // 直近に適用したオーバーレイID一覧（消失検出用）
   function findRawMap() {
     if (rawMap) return rawMap;
     var el = $("mapEl");
@@ -1442,6 +1458,7 @@
     var map = rawMap;
     if (!map) return;
     var overlays = options.overlays || [];
+    lastOverlayIds = overlays.map(function (ov) { return ov.id; });
     var nextIds = {};
     var anchorId = firstLabelLayerId(map);
     overlays.forEach(function (ov) {
@@ -1478,11 +1495,14 @@
       delete adapterOverlayLayers[id];
     });
     // 重畳（描画順）の確定。マウント時に React 側が入れたレイヤーと、
-    // 後からアダプタが足したレイヤー（現在地・扇形など）では挿入位置の
-    // 基準が違い、現在地だけがベースマップの道路や塗りの下に潜って
-    // 「マップの裏」にあるように見えることがある。毎回の更新で全
-    // オーバーレイをラベルレイヤーの直下に配列順で並べ直し、さらに
-    // 現在地（扇形→ハロー→ドット）は最前面へ持ってくる。
+    // 後からアダプタが足したレイヤーでは挿入位置の基準が違い、ベース
+    // マップの道路や塗りの下に潜って「マップの裏」にあるように見える
+    // ことがある（現在地ドット・扇形だけでなく、現在地→目標駅の
+    // ルート線や一周ラインも同様）。毎回の更新で全オーバーレイを
+    // 配列順（ルート線群→扇形→現在地）のままラベルレイヤーの直下へ
+    // 並べ直し、さらに現在地（扇形→ハロー→ドット）は最前面へ
+    // 持ってくる。これでルート線は道路・塗りより上、現在地より下に
+    // 統一される。
     try {
       var stackAnchor = firstLabelLayerId(map);
       overlays.forEach(function (ov) {
@@ -1507,6 +1527,24 @@
         map.jumpTo(jump);
       } catch (e) {}
     }
+  }
+  // ベーススタイルが再読み込みされると、React 側は style.load の
+  // タイミングで全オーバーレイを挿入基準レイヤー（insert-here）の
+  // 位置へ入れ直す。その深さはベースマップの道路・塗りより下に
+  // なることがあり、ルート線が「マップの裏」に戻ってしまう。
+  // React 側の再追加（同じ style.load で先に登録されている）より
+  // 後に強制再同期をかけ、ルート線を含む全オーバーレイの重畳を
+  // こちらで確定し直す。
+  var styleHookInstalled = false;
+  function installStyleReloadHook() {
+    if (styleHookInstalled || !rawMap || typeof rawMap.on !== "function") return;
+    styleHookInstalled = true;
+    try {
+      rawMap.on("style.load", function () {
+        requestAnimationFrame(function () { lastSyncKey = null; syncMap(true); });
+        setTimeout(function () { lastSyncKey = null; syncMap(true); }, 350);
+      });
+    } catch (e) {}
   }
   function mountMapNow() {
     if (mapUnavailable || mapHandle) return;
@@ -2613,6 +2651,7 @@
       if (findRawMap()) {
         clearInterval(loadPoll);
         applyGestureLock();
+        installStyleReloadHook();
         lastSyncKey = null;
         syncMap(true);
       } else if (rawPollTries > 100) {
