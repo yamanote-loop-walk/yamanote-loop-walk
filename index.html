@@ -235,7 +235,7 @@
         position: relative; margin-bottom: 12px; border-radius: 16px; border: 1px solid var(--border);
         background: var(--surface); padding: 12px 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,.1);
       }
-      .start-balloon p { font-size: 14px; font-weight: 700; line-height: 1.6; margin: 0; }
+      .start-balloon p { font-size: 13px; font-weight: 700; line-height: 1.6; margin: 0; }
       .start-balloon .tail { position: absolute; bottom: -7px; left: 50%; width: 14px; height: 14px; transform: translateX(-50%) rotate(45deg); border-bottom: 1px solid var(--border); border-right: 1px solid var(--border); background: var(--surface); }
       .hold-btn {
         position: relative; width: 100%; border: 0; overflow: hidden; border-radius: 9999px;
@@ -434,7 +434,7 @@
           <p style="margin:0">補完区間：アプリが閉じていた等の未計測区間を、最後の記録地点から再開地点までの徒歩最短ルート距離で補完しています。</p>
           <ul id="gapsList"></ul>
         </div>
-        <p class="note-error hidden" id="gpsDeniedNote" style="padding-top:4px">位置情報が許可されていないため、実歩行距離は計測されていません。ブラウザの位置情報設定をご確認ください。</p>
+        <p class="note-error hidden" id="gpsDeniedNote" style="padding-top:4px;cursor:pointer">位置情報が許可されていないため、実歩行距離は計測されていません。タップすると許可のしかたを表示します。</p>
         <div class="card">
           <p class="cap-label" id="targetKind">次の目標駅</p>
           <p class="target-name" id="targetName"></p>
@@ -503,7 +503,7 @@
     <div class="bottom-bar hidden" id="startBar">
       <div class="inner">
         <div class="start-balloon balloon-attention">
-          <p>次の駅に到着したらこのボタンを長押し　到着時間を記録して次の駅までのルートを設定します</p>
+          <p>駅に到着したらこのボタンを長押し<br />到着時間を記録して次の駅までのルートを設定します</p>
           <span class="tail" aria-hidden="true"></span>
         </div>
         <button type="button" class="hold-btn" id="startHoldBtn" aria-label="長押しでスタート：長押しし続けると開始駅の雑学が表示され、閉じると計測が始まります">
@@ -584,6 +584,32 @@
           <strong>ご注意（追加しても Muse の画面になってしまう件）：</strong>この共有ページは、Safariで開いたときも含め、Muse の画面の中に埋め込まれて表示される仕組みです。そのため「ホーム画面に追加」をすると、このアプリではなく外側の Muse の画面が登録されてしまい、開くたびに Muse のログイン画面が出ます。これは共有リンク側の仕組みによるもので、このページ側からは直せません。追加してしまったアイコンは削除して、このアプリはブラウザで開いたまま、または Muse アプリからご利用ください。
         </div>
         <button type="button" class="install-close" id="installDialogClose">閉じる</button>
+      </div>
+    </div>
+
+    <!-- 位置情報の許可：案内ダイアログ -->
+    <div class="dialog-backdrop hidden" id="geoDialog" role="dialog" aria-modal="true" aria-label="位置情報の許可について">
+      <div class="dialog-card install-card">
+        <h2>位置情報をオンにしてください</h2>
+        <p class="small dim" style="margin-top:8px">現在地の表示・追従と、歩いた距離の計測には位置情報が必要です。まず下のボタンを押して、ブラウザの許可ダイアログで「許可」を選んでください。</p>
+        <button type="button" class="install-close" id="geoRequestBtn" style="margin-top:12px">位置情報の許可ダイアログを出す</button>
+        <p class="small dim" style="margin-top:12px">ダイアログが出ない場合（過去に「許可しない」を選んだ場合）は、ブラウザからは出し直せないため、端末の設定から許可してください。</p>
+        <p style="margin-top:14px;font-weight:900;font-size:14px">iPhoneの場合</p>
+        <ol>
+          <li>「設定」アプリを開きます。</li>
+          <li>「プライバシーとセキュリティ」→「位置情報サービス」を開き、位置情報サービス自体をオンにします。</li>
+          <li>ホーム画面に追加したアプリで使っている場合は「山手線一周ウォーク」、Safariで開いている場合は「Safari」を選びます。</li>
+          <li>「このAppの使用中のみ許可」を選び、「正確な位置情報」もオンにします。</li>
+          <li>このアプリに戻ると現在地が表示されます。</li>
+        </ol>
+        <p style="margin-top:14px;font-weight:900;font-size:14px">Androidの場合</p>
+        <ol>
+          <li>Chromeのアドレスバー左端のアイコンを押します。</li>
+          <li>「権限」（または「サイトの設定」）→「位置情報」を「許可」にします。</li>
+          <li>見つからない場合は「設定」アプリ→「位置情報」をオンにし、アプリ一覧でChromeの位置情報アクセスを許可します。</li>
+          <li>このアプリに戻ると現在地が表示されます。</li>
+        </ol>
+        <button type="button" class="install-close" id="geoDialogClose">閉じる</button>
       </div>
     </div>
 
@@ -926,6 +952,9 @@
     lastKept = null; trackBuffer = []; trackInFlight = [];
     render();
     syncMap(true);
+    /* スタート時点で位置情報の許可を確認する：未回答ならブラウザ標準の
+       許可ダイアログが出て、拒否済みなら案内ポップアップを開く */
+    promptLocationPermission(false);
   }
   function moveTarget(delta) {
     if (session.status !== "walking") return;
@@ -1513,9 +1542,10 @@
           onFix(pos);
           beginFollow();
         },
-        function () {
+        function (err) {
           jumpBusy = false;
           renderMapBits();
+          if (err && err.code === err.PERMISSION_DENIED) openGeoDialog(false);
           if (!myPosRef) {
             var n = $("jumpNote");
             n.textContent = "現在地を取得できませんでした。位置情報の許可をご確認ください。";
@@ -2204,8 +2234,25 @@
     var dlg = $("triviaDialog");
     dlg.setAttribute("aria-label", isStart ? st.name + "駅からスタート" : st.name + "駅に到着");
     var img = $("triviaImg");
-    img.src = info.photo;
     img.alt = st.name + "駅の写真";
+    img.classList.remove("hidden");
+    /* 写真は同梱ファイル（assets/stations/…）から読み込むのが基本。
+       単体ファイルとして配信される環境（GitHub Pages 等、同梱ファイルが
+       置かれていない場所）では読み込みに失敗するため、その場合は
+       Wikimedia Commons の元画像（出典ページのファイル）へ切り替える。
+       どちらも失敗したら写真欄を隠す（壊れた画像アイコンを出さない）。 */
+    img.onerror = function () {
+      img.onerror = null;
+      var m = /\/File:([^/?#]+)/.exec((info.photoCredit && info.photoCredit.sourceUrl) || "");
+      if (m) {
+        img.onerror = function () { img.onerror = null; img.classList.add("hidden"); };
+        img.src = "https://commons.wikimedia.org/wiki/Special:FilePath/" + m[1] + "?width=1024";
+      } else {
+        img.removeAttribute("src");
+        img.classList.add("hidden");
+      }
+    };
+    img.src = info.photo;
     $("triviaTitle").textContent = isStart ? st.name + "駅からスタート！" : st.name + "駅に到着！";
     $("triviaText").textContent = trivia;
     $("triviaSourceLink").href = info.triviaSourceUrl;
@@ -2233,6 +2280,39 @@
     if (arriveHoldBtn) arriveHoldBtn.refresh();
     render();
     syncMap(true);
+  }
+
+  /* ---------- 位置情報の許可案内ポップアップ ---------- */
+  var geoHelpShown = false;
+  function openGeoDialog(auto) {
+    if (auto && geoHelpShown) return;
+    geoHelpShown = true;
+    $("geoDialog").classList.remove("hidden");
+  }
+  function closeGeoDialog() {
+    $("geoDialog").classList.add("hidden");
+  }
+  /* ブラウザ標準の許可ダイアログを出す（まだ回答していない場合に表示される）。
+     すでに拒否済みの場合は即エラーになるので、案内ポップアップを開く。
+     fromDialog=true のときは取得できたらポップアップを閉じる。 */
+  function promptLocationPermission(fromDialog) {
+    if (!("geolocation" in navigator)) return;
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        gpsDenied = false;
+        onFix(pos);
+        renderWalkingStats();
+        if (fromDialog) closeGeoDialog();
+      },
+      function (err) {
+        if (err && err.code === err.PERMISSION_DENIED) {
+          gpsDenied = true;
+          renderWalkingStats();
+          if (!fromDialog) openGeoDialog(true);
+        }
+      },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+    );
   }
 
   /* ---------- 到着の確定 ---------- */
@@ -2378,6 +2458,10 @@
       }
     });
     $("triviaCloseBtn").addEventListener("click", closeTriviaPopup);
+    $("geoDialogClose").addEventListener("click", closeGeoDialog);
+    $("geoRequestBtn").addEventListener("click", function () { promptLocationPermission(true); });
+    $("geoDialog").addEventListener("click", function (ev) { if (ev.target === $("geoDialog")) closeGeoDialog(); });
+    $("gpsDeniedNote").addEventListener("click", function () { openGeoDialog(false); });
     $("saveResultBtn").addEventListener("click", onSaveResultImage);
     $("previewCloseBtn").addEventListener("click", closeResultPreview);
     $("previewSaveBtn").addEventListener("click", function () {
@@ -2493,7 +2577,7 @@
       awaitingFirstFix = true;
       watchId = navigator.geolocation.watchPosition(
         function (pos) { onFix(pos); },
-        function (err) { if (err.code === err.PERMISSION_DENIED) { gpsDenied = true; renderWalkingStats(); } },
+        function (err) { if (err.code === err.PERMISSION_DENIED) { gpsDenied = true; renderWalkingStats(); if (session.status === "walking") openGeoDialog(true); } },
         { enableHighAccuracy: true, maximumAge: 5000, timeout: 20000 }
       );
     }
