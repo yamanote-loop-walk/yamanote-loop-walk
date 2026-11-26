@@ -564,15 +564,15 @@
       </div>
       <div class="preview-ios-note hidden" id="previewIosNote">
         <span class="i-badge" aria-hidden="true">i</span>
-        <p>画像を長押しして<br />「写真に追加」で保存できます</p>
+        <p>画像を長押しして<br />「写真に保存」で保存できます</p>
       </div>
       <div class="preview-dl hidden" id="previewDl">
         <button type="button" id="previewSaveBtn">この画像を保存する</button>
         <p>ボタンを押すと端末に保存されます</p>
       </div>
       <div class="preview-scroll">
-        <img id="previewImg" alt="ゴール結果のリザルト画像（サマリーと各駅の到着時刻リスト）" />
-        <p class="ios-foot hidden" id="previewIosFoot">保存できないときは、上の画像を長押しして表示されるメニューから「写真に追加」を選んでください</p>
+        <img id="previewImg" alt="ゴール結果のリザルト画像（サマリー、軌跡マップ、各駅の到着時刻リスト）" />
+        <p class="ios-foot hidden" id="previewIosFoot">保存できないときは、上の画像を長押しして表示されるメニューから「写真に保存」を選んでください</p>
       </div>
     </div>
 
@@ -623,7 +623,7 @@
     <!-- 保存完了バナー -->
     <div class="saved-banner hidden" id="savedBanner" role="status">
       <span class="check" aria-hidden="true">✓</span>
-      <p>画像を保存しました！</p>
+      <p id="savedBannerText">画像を保存しました！</p>
       <button type="button" id="savedBannerClose" aria-label="保存完了の通知を閉じる">×</button>
     </div>
 
@@ -1216,6 +1216,9 @@
         liveRoute = { targetIndex: tIdx, coords: res.coords, meters: res.meters, version: seq };
       }
       renderTargetCard();
+      // ルートが設定されたタイミングで、残りの距離とゴール予測を
+      // リアルタイム版（実ルート距離ベース）へ即時差し替える
+      if (typeof renderTimer === "function") renderTimer();
       syncMap(true);
     });
   }
@@ -1933,10 +1936,107 @@
   }
 
   /* ---------- リザルト画像（元アプリから移植） ---------- */
+  function rrPath(g, x, y, w, h, r) {
+    g.beginPath();
+    g.moveTo(x + r, y);
+    g.lineTo(x + w - r, y); g.arcTo(x + w, y, x + w, y + r, r);
+    g.lineTo(x + w, y + h - r); g.arcTo(x + w, y + h, x + w - r, y + h, r);
+    g.lineTo(x + r, y + h); g.arcTo(x, y + h, x, y + h - r, r);
+    g.lineTo(x, y + r); g.arcTo(x, y, x + r, y, r);
+    g.closePath();
+  }
+  // 簡易マップ：外部地図タイルを使わず、1周ルート＋GPS軌跡＋開始/ゴール点だけを描く
+  function drawResultMap(g, args, x, y, w, h) {
+    var track = args.track || [];
+    var minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
+    function ext(lat, lng) {
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lng < minLng) minLng = lng;
+      if (lng > maxLng) maxLng = lng;
+    }
+    STATIONS.forEach(function (s) { ext(s.lat, s.lng); });
+    track.forEach(function (p) { ext(p.lat, p.lng); });
+    var kx = Math.cos(((minLat + maxLat) / 2) * Math.PI / 180);
+    var spanX = Math.max(1e-9, (maxLng - minLng) * kx);
+    var spanY = Math.max(1e-9, maxLat - minLat);
+    var pad = 30;
+    var fit = Math.min((w - pad * 2) / spanX, (h - pad * 2) / spanY);
+    var ox = x + (w - spanX * fit) / 2, oy = y + (h - spanY * fit) / 2;
+    function PX(lng) { return ox + (lng - minLng) * kx * fit; }
+    function PY(lat) { return oy + (maxLat - lat) * fit; }
+    // 1周ルート（緑）
+    var loop = joinCoords(SEGMENT_GEOMETRIES.map(function (gm) { return gm || []; }));
+    if (loop.length > 1) {
+      g.strokeStyle = "rgba(109,190,69,0.6)"; g.lineWidth = 5; g.lineJoin = "round"; g.lineCap = "round";
+      g.beginPath();
+      loop.forEach(function (c, i) {
+        var px = PX(c[0]), py = PY(c[1]);
+        if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+      });
+      g.closePath(); g.stroke();
+    }
+    // 駅ドット（開始駅以外）
+    STATIONS.forEach(function (s, i) {
+      if (i === args.startIndex) return;
+      g.beginPath(); g.arc(PX(s.lng), PY(s.lat), 3.5, 0, Math.PI * 2);
+      g.fillStyle = "#ffffff"; g.fill();
+      g.strokeStyle = "#6DBE45"; g.lineWidth = 2; g.stroke();
+    });
+    // GPS軌跡（青線／補完区間は点線）
+    if (track.length > 1) {
+      g.lineJoin = "round"; g.lineCap = "round";
+      var mode = null;
+      function styleFor(m) {
+        if (m === "gap") { g.strokeStyle = "rgba(37,99,235,0.5)"; g.lineWidth = 3.5; g.setLineDash([9, 7]); }
+        else { g.strokeStyle = "#2563EB"; g.lineWidth = 4.5; g.setLineDash([]); }
+      }
+      g.beginPath();
+      g.moveTo(PX(track[0].lng), PY(track[0].lat));
+      for (var i = 1; i < track.length; i++) {
+        var m = typeof track[i].gapMeters === "number" ? "gap" : "walk";
+        if (mode !== m) {
+          g.stroke();
+          styleFor(m);
+          g.beginPath();
+          g.moveTo(PX(track[i - 1].lng), PY(track[i - 1].lat));
+          mode = m;
+        }
+        g.lineTo(PX(track[i].lng), PY(track[i].lat));
+      }
+      g.stroke();
+      g.setLineDash([]);
+    } else {
+      g.fillStyle = "#5B6B5E"; g.font = "17px sans-serif"; g.textAlign = "center"; g.textBaseline = "middle";
+      g.fillText("GPS軌跡の記録がありません", x + w / 2, y + h / 2);
+    }
+    // 開始/ゴール点
+    var st = STATIONS[args.startIndex];
+    if (st) {
+      var sx = PX(st.lng), sy = PY(st.lat);
+      g.beginPath(); g.arc(sx, sy, 10, 0, Math.PI * 2);
+      g.fillStyle = "#E6007E"; g.fill();
+      g.lineWidth = 4; g.strokeStyle = "#ffffff"; g.stroke();
+      g.beginPath(); g.arc(sx, sy, 3.5, 0, Math.PI * 2);
+      g.fillStyle = "#ffffff"; g.fill();
+      var label = "スタート／ゴール";
+      g.font = "900 16px sans-serif"; g.textBaseline = "middle";
+      var tw = g.measureText(label).width;
+      var lx = sx + 16, align = "left";
+      if (lx + tw > x + w - 8) { lx = sx - 16; align = "right"; }
+      g.textAlign = align;
+      g.lineWidth = 4; g.strokeStyle = "rgba(255,255,255,0.85)";
+      g.strokeText(label, lx, sy);
+      g.fillStyle = "#14231A";
+      g.fillText(label, lx, sy);
+    }
+  }
   function renderResultImage(args) {
     return new Promise(function (resolve, reject) {
       var W = 720, headerH = 356, rowH = 58, footerH = 64;
-      var H = headerH + args.rows.length * rowH + footerH;
+      var mapTitleH = 54, mapPanelH = 520, mapLegendH = 46;
+      var mapH = mapTitleH + mapPanelH + mapLegendH;
+      var H = headerH + mapH + args.rows.length * rowH + footerH;
       var scale = 2;
       var canvas = document.createElement("canvas");
       canvas.width = W * scale; canvas.height = H * scale;
@@ -1958,8 +2058,29 @@
       g.fillText("実歩行距離 " + args.distanceLabel, W / 2, 292);
       g.font = "16px sans-serif";
       g.fillText(args.distanceDetail, W / 2, 324);
+      // 軌跡マップ（緑の総時間欄と各駅の到着時刻リストの間）
+      var mapY = headerH;
+      g.fillStyle = "#14231A"; g.textAlign = "left"; g.textBaseline = "middle";
+      g.font = "900 22px sans-serif";
+      g.fillText("歩いた軌跡", 40, mapY + mapTitleH / 2 + 2);
+      var panelX = 36, panelY = mapY + mapTitleH, panelW = W - 72, panelH = mapPanelH;
+      g.fillStyle = "#F4F8F1";
+      rrPath(g, panelX, panelY, panelW, panelH, 16); g.fill();
+      g.strokeStyle = "#D7E0D2"; g.lineWidth = 1.5;
+      rrPath(g, panelX, panelY, panelW, panelH, 16); g.stroke();
+      drawResultMap(g, args, panelX, panelY, panelW, panelH);
+      var track = args.track || [];
+      var hasGap = track.some(function (p) { return typeof p.gapMeters === "number"; });
+      var legend = "緑：山手線ルート";
+      if (track.length > 1) {
+        legend += "　青：歩いた軌跡";
+        if (hasGap) legend += "　点線：GPS補完区間";
+      }
+      g.fillStyle = "#5B6B5E"; g.textAlign = "center"; g.font = "15px sans-serif";
+      g.fillText(legend, W / 2, panelY + panelH + mapLegendH / 2 + 2);
+      var rowsTop = headerH + mapH;
       args.rows.forEach(function (row, i) {
-        var y = headerH + i * rowH;
+        var y = rowsTop + i * rowH;
         if (i % 2 === 1) { g.fillStyle = "#F2F7EE"; g.fillRect(0, y, W, rowH); }
         g.fillStyle = "#6DBE45";
         g.beginPath(); g.arc(52, y + rowH / 2, 17, 0, Math.PI * 2); g.fill();
@@ -1975,7 +2096,7 @@
         g.beginPath(); g.moveTo(0, y + rowH - 0.5); g.lineTo(W, y + rowH - 0.5); g.stroke();
       });
       g.fillStyle = "#5B6B5E"; g.textAlign = "center"; g.font = "15px sans-serif";
-      g.fillText("山手線1周ウォーク", W / 2, headerH + args.rows.length * rowH + footerH / 2);
+      g.fillText("山手線1周ウォーク", W / 2, rowsTop + args.rows.length * rowH + footerH / 2);
       canvas.toBlob(function (blob) {
         if (blob) resolve(blob); else reject(new Error("image encode failed"));
       }, "image/png");
@@ -1996,7 +2117,8 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
     return true;
   }
-  function showSavedBanner() {
+  function showSavedBanner(text) {
+    $("savedBannerText").textContent = text || "画像を保存しました！";
     $("savedBanner").classList.remove("hidden");
     if (savedBannerTimer != null) clearTimeout(savedBannerTimer);
     savedBannerTimer = setTimeout(function () {
@@ -2012,10 +2134,23 @@
   function computeEta() {
     if (session.status !== "walking") return null;
     var order = currentOrder();
-    var doneSegments = session.targetOffset - 1;
-    var walkedRoute = 0;
-    for (var j = 0; j < doneSegments; j++) walkedRoute += segmentMeters(order, j);
-    var remaining = TOTAL_METERS - walkedRoute;
+    // リアルタイム版の残りの距離：
+    // 現在区間は「現在地から目標駅まで実際に引いたルートの距離（liveRoute）」を使い、
+    // 固定の予定距離は破棄する。目標駅より先の未到達区間は固定の駅間距離の合計。
+    // liveRoute が現在の目標駅向けでない／未取得のときは、従来の固定合計にフォールバックする。
+    var remaining;
+    var targetIdx = order[session.targetOffset] != null ? order[session.targetOffset] : session.startIndex;
+    var liveForTarget = liveRoute && liveRoute.targetIndex === targetIdx && typeof liveRoute.meters === "number" && liveRoute.meters > 0 ? liveRoute : null;
+    if (liveForTarget) {
+      var futureFixed = 0;
+      for (var fj = session.targetOffset; fj < 30; fj++) futureFixed += segmentMeters(order, fj);
+      remaining = liveForTarget.meters + futureFixed;
+    } else {
+      var doneSegments = session.targetOffset - 1;
+      var walkedRoute = 0;
+      for (var j = 0; j < doneSegments; j++) walkedRoute += segmentMeters(order, j);
+      remaining = TOTAL_METERS - walkedRoute;
+    }
     var d = derived();
     var useWeighted = d.totalDistanceMeters >= WEIGHTED_PACE_MIN_METERS && d.weightedSpeedMps != null && d.weightedSpeedMps > 0;
     var pace = useWeighted ? d.weightedSpeedMps : INITIAL_SPEED_MPS;
@@ -2532,6 +2667,8 @@
       distanceLabel: formatMeters(d.totalDistanceMeters),
       distanceDetail: "GPS計測 " + formatMeters(d.walkedMeters) + (d.gapMeters > 0 ? " ＋ 補完 " + formatMeters(d.gapMeters) + "（" + d.gaps.length + "区間）" : ""),
       rows: rows,
+      track: session.track || [],
+      startIndex: session.startIndex,
     }).then(function (blob) {
       if (resultPreview) URL.revokeObjectURL(resultPreview.url);
       resultPreview = { url: URL.createObjectURL(blob), blob: blob };
@@ -2695,6 +2832,16 @@
       if (session.status !== "walking") return;
       flushTrack();
     }, 90000);
+
+    // 残りの距離のリアルタイム更新（1分ごと）：
+    // 現在地から目標駅までのルートを引き直し、実ルート距離で
+    // 現在区間分を差し替えた残りの距離とゴール予測を再表示する
+    setInterval(function () {
+      if (session.status !== "walking") return;
+      if (!pageVisible) return;
+      requestRoute(true);
+      renderTimer();
+    }, 60000);
 
     // Heartbeat：起動時と画面復帰時に「操作あり」を記録（60秒スロットル）
     var beat = function () {
