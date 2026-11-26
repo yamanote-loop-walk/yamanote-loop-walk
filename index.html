@@ -1408,6 +1408,7 @@
   var rawMap = null;
   var adapterOverlayLayers = {}; // overlayId -> [layerId, ...]
   var lastOverlayIds = []; // 直近に適用したオーバーレイID一覧（消失検出用）
+  var lastAppliedOverlays = []; // 直近に適用したオーバーレイ一式（重畳の正規順序の基準）
   function findRawMap() {
     if (rawMap) return rawMap;
     var el = $("mapEl");
@@ -1459,6 +1460,7 @@
     if (!map) return;
     var overlays = options.overlays || [];
     lastOverlayIds = overlays.map(function (ov) { return ov.id; });
+    lastAppliedOverlays = overlays;
     var nextIds = {};
     var anchorId = firstLabelLayerId(map);
     overlays.forEach(function (ov) {
@@ -1494,31 +1496,11 @@
       try { if (map.getSource(id)) map.removeSource(id); } catch (e) {}
       delete adapterOverlayLayers[id];
     });
-    // 重畳（描画順）の確定。マウント時に React 側が入れたレイヤーと、
-    // 後からアダプタが足したレイヤーでは挿入位置の基準が違い、ベース
-    // マップの道路や塗りの下に潜って「マップの裏」にあるように見える
-    // ことがある（現在地ドット・扇形だけでなく、現在地→目標駅の
-    // ルート線や1周ラインも同様）。毎回の更新で全オーバーレイを
-    // 配列順（ルート線群→扇形→現在地）のままラベルレイヤーの直下へ
-    // 並べ直し、さらに現在地（扇形→ハロー→ドット）は最前面へ
-    // 持ってくる。これでルート線は道路・塗りより上、現在地より下に
-    // 統一される。
-    try {
-      var stackAnchor = firstLabelLayerId(map);
-      overlays.forEach(function (ov) {
-        (ov.layers || []).forEach(function (layer) {
-          try { if (map.getLayer(layer.id)) map.moveLayer(layer.id, stackAnchor); } catch (e) {}
-        });
-      });
-      ["route-heading", "route-myloc"].forEach(function (oid) {
-        overlays.forEach(function (ov) {
-          if (ov.id !== oid) return;
-          (ov.layers || []).forEach(function (layer) {
-            try { if (map.getLayer(layer.id)) map.moveLayer(layer.id); } catch (e) {}
-          });
-        });
-      });
-    } catch (e) {}
+    // 重畳（描画順）の確定。ルートデータが更新されるたび（この描画同期の
+    // 最後）に、必ず全オーバーレイを所定位置へ並べ直す。並べ替え本体は
+    // enforceOverlayOrder に切り出してあり、描画のたびの常時検証
+    // （installOverlayOrderWatchdog）からも同じ処理を呼ぶ。
+    enforceOverlayOrder();
     if (options.center) {
       try {
         var jump = { center: { lng: options.center.lng, lat: options.center.lat } };
@@ -1528,19 +1510,171 @@
       } catch (e) {}
     }
   }
+  /* ---------- 重畳（描画順）の常時保証 ----------
+     React 側はオーバーレイを挿入基準レイヤー（insert-here）の位置、
+     つまりベースマップの道路・塗りより下へ差し込む。しかもその
+     再挿入は style.load の瞬間だけでなく、React 側の再レンダーや
+     遅れて走る再調整でも起きるため、「イベント時に再同期する」
+     方式では実機で追いつかず、ルート線が下に潜ったままになる。
+     そこで並べ替えを常時保証に変える:
+       - 描画のたび（render を間引き＋idle）と定期チェックで現在の
+         レイヤー順を検証し、崩れていたら即座に直す
+       - ルートデータ更新（applyMapUpdate）の最後でも必ず並べ直す
+         （上の enforceOverlayOrder 呼び出し）                        */
+  var TOP_OVERLAY_IDS = ["route-heading", "route-myloc"]; // 最前面に置くオーバーレイ
+  var anchorCacheCount = -1, anchorCacheId = undefined;
+  function isOverlayLayerId(layerId) {
+    for (var i = 0; i < lastAppliedOverlays.length; i++) {
+      var ls = lastAppliedOverlays[i].layers || [];
+      for (var j = 0; j < ls.length; j++) if (ls[j].id === layerId) return true;
+    }
+    return false;
+  }
+  function currentLayerIds(map) {
+    try {
+      if (typeof map.getLayersOrder === "function") return map.getLayersOrder().slice();
+      var layers = (map.getStyle() && map.getStyle().layers) || [];
+      var out = [];
+      for (var i = 0; i < layers.length; i++) out.push(layers[i].id);
+      return out;
+    } catch (e) { return []; }
+  }
+  // 並べ替えのアンカー（最初のラベルレイヤー）を検証付きで解決する。
+  // 現在のスタイルに実在しない／自前オーバーレイである／取得できない
+  // 場合はアンカー無効として undefined を返し、呼び出し側は末尾
+  // （最前面側）への移動にフォールバックする。
+  function resolveAnchorId(map) {
+    var ids = currentLayerIds(map);
+    if (ids.length > 0 && anchorCacheCount === ids.length &&
+        (anchorCacheId === undefined || ids.indexOf(anchorCacheId) >= 0)) {
+      return anchorCacheId;
+    }
+    var id = firstLabelLayerId(map);
+    if (id && isOverlayLayerId(id)) id = undefined;
+    if (id) { try { if (!map.getLayer(id)) id = undefined; } catch (e) { id = undefined; } }
+    anchorCacheCount = ids.length;
+    anchorCacheId = id;
+    return id;
+  }
+  // 全オーバーレイを配列順（ルート線群→扇形→現在地）のままアンカー
+  // （ラベルレイヤー）の直下へ並べ直し、現在地系（扇形→ハロー→
+  // ドット）は最前面へ持ってくる。アンカーが無い／無効な場合は
+  // 全オーバーレイを末尾（最前面側）へ並べる。
+  function enforceOverlayOrder() {
+    var map = rawMap;
+    if (!map || lastAppliedOverlays.length === 0) return;
+    try {
+      var anchorId = resolveAnchorId(map);
+      lastAppliedOverlays.forEach(function (ov) {
+        (ov.layers || []).forEach(function (layer) {
+          try { if (map.getLayer(layer.id)) map.moveLayer(layer.id, anchorId); } catch (e) {}
+        });
+      });
+      TOP_OVERLAY_IDS.forEach(function (oid) {
+        lastAppliedOverlays.forEach(function (ov) {
+          if (ov.id !== oid) return;
+          (ov.layers || []).forEach(function (layer) {
+            try { if (map.getLayer(layer.id)) map.moveLayer(layer.id); } catch (e) {}
+          });
+        });
+      });
+    } catch (e) {}
+  }
+  function expectedOverlayLayerIds() {
+    var nonTop = [], top = [];
+    lastAppliedOverlays.forEach(function (ov) {
+      var bucket = TOP_OVERLAY_IDS.indexOf(ov.id) >= 0 ? top : nonTop;
+      (ov.layers || []).forEach(function (l) { bucket.push(l.id); });
+    });
+    return { nonTop: nonTop, top: top };
+  }
+  function sameLayerIds(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  // 現在のレイヤー順が所定どおりか:
+  //   - 期待する全オーバーレイのレイヤーが存在する
+  //   - 現在地系が末尾に順序どおり並んでいる
+  //   - ルート線群がアンカー直前に順序どおり連続して並んでいる
+  //     （アンカーが無い場合は末尾＝現在地系の直前に連続）
+  function overlayOrderIsValid() {
+    var map = rawMap;
+    if (!map || lastAppliedOverlays.length === 0) return true;
+    var ids = currentLayerIds(map);
+    if (ids.length === 0) return true; // スタイル未確定の間は触らない
+    var exp = expectedOverlayLayerIds();
+    var all = exp.nonTop.concat(exp.top);
+    for (var i = 0; i < all.length; i++) if (ids.indexOf(all[i]) < 0) return false;
+    if (exp.top.length > 0 && !sameLayerIds(ids.slice(ids.length - exp.top.length), exp.top)) return false;
+    var body = ids.slice(0, ids.length - exp.top.length);
+    var anchorId = resolveAnchorId(map);
+    if (anchorId) {
+      var ai = body.indexOf(anchorId);
+      if (ai < exp.nonTop.length) return false;
+      if (!sameLayerIds(body.slice(ai - exp.nonTop.length, ai), exp.nonTop)) return false;
+    } else {
+      if (!sameLayerIds(body.slice(body.length - exp.nonTop.length), exp.nonTop)) return false;
+    }
+    return true;
+  }
+  function checkOverlayOrder() {
+    if (!rawMap || mapUnavailable || !pageVisible) return;
+    if (lastAppliedOverlays.length === 0) return;
+    try {
+      if (overlayOrderIsValid()) return;
+      enforceOverlayOrder();
+      if (!overlayOrderIsValid()) {
+        // レイヤー自体が消えている等、並べ替えだけでは直らない場合は
+        // オーバーレイ全体を作り直す
+        lastSyncKey = null;
+        syncMap(true);
+      }
+    } catch (e) {}
+  }
+  // render イベントの中で直接スタイルを触らないよう、検証は少し
+  // 遅らせてイベントの外で実行する。
+  var overlayCheckTimer = null;
+  function scheduleOverlayOrderCheck() {
+    if (overlayCheckTimer != null) return;
+    overlayCheckTimer = setTimeout(function () {
+      overlayCheckTimer = null;
+      checkOverlayOrder();
+    }, 60);
+  }
+  var orderWatchdogInstalled = false;
+  function installOverlayOrderWatchdog() {
+    if (orderWatchdogInstalled || !rawMap) return;
+    orderWatchdogInstalled = true;
+    try {
+      if (typeof rawMap.on === "function") {
+        rawMap.on("idle", scheduleOverlayOrderCheck);
+        var lastRenderCheckAt = 0;
+        rawMap.on("render", function () {
+          var now = Date.now();
+          if (now - lastRenderCheckAt < 700) return;
+          lastRenderCheckAt = now;
+          scheduleOverlayOrderCheck();
+        });
+      }
+    } catch (e) {}
+    // 描画イベントが来ない間も、定期チェックで順序を保証し続ける
+    setInterval(checkOverlayOrder, 1200);
+  }
   // ベーススタイルが再読み込みされると、React 側は style.load の
   // タイミングで全オーバーレイを挿入基準レイヤー（insert-here）の
   // 位置へ入れ直す。その深さはベースマップの道路・塗りより下に
   // なることがあり、ルート線が「マップの裏」に戻ってしまう。
   // React 側の再追加（同じ style.load で先に登録されている）より
   // 後に強制再同期をかけ、ルート線を含む全オーバーレイの重畳を
-  // こちらで確定し直す。
+  // こちらで確定し直す（上記の常時保証と併用する）。
   var styleHookInstalled = false;
   function installStyleReloadHook() {
     if (styleHookInstalled || !rawMap || typeof rawMap.on !== "function") return;
     styleHookInstalled = true;
     try {
       rawMap.on("style.load", function () {
+        anchorCacheCount = -1; anchorCacheId = undefined; // スタイルが替わったらアンカーを再解決する
         requestAnimationFrame(function () { lastSyncKey = null; syncMap(true); });
         setTimeout(function () { lastSyncKey = null; syncMap(true); }, 350);
       });
@@ -2652,6 +2786,7 @@
         clearInterval(loadPoll);
         applyGestureLock();
         installStyleReloadHook();
+        installOverlayOrderWatchdog();
         lastSyncKey = null;
         syncMap(true);
       } else if (rawPollTries > 100) {
