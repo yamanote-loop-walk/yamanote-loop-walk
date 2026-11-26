@@ -2182,6 +2182,9 @@
         if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 450);
     }
+    // 次に表示される駅ポップアップの写真を先行ロードする
+    // （設定画面の表示時・開始駅プルダウン変更時・目標駅が設定された時点）
+    preloadUpcomingPhoto();
   }
 
   function renderStationList(order) {
@@ -2255,6 +2258,74 @@
     }
   }
 
+  /* ---------- 駅写真の解決と先行ロード ----------
+     ポップアップ表示とまったく同じ経路で写真URLを解決する：
+     同梱ファイル（assets/stations/…）→ 失敗したら Wikimedia Commons の
+     元画像。実際に表示できたURLは駅ごとに覚えておき、次回からは
+     解決済みURLを直接読み込む（同梱ファイルが置かれていない環境で
+     毎回404を待たずに済むようにする）。 */
+  var resolvedPhotoUrls = {}; // stationIndex -> 最終的に表示できたURL
+  var photoPreload = null;    // { stationIndex, img } 先行ロードは次の駅1件分だけ保持
+
+  function photoFallbackUrl(info) {
+    var m = /\/File:([^/?#]+)/.exec((info.photoCredit && info.photoCredit.sourceUrl) || "");
+    return m ? "https://commons.wikimedia.org/wiki/Special:FilePath/" + m[1] + "?width=1024" : null;
+  }
+
+  /* img（表示用 <img> でも先行ロード用 Image でも可）へ駅写真を読み込む。
+     候補を順に試し、成功したURLを駅ごとに記録する。全滅したら onFail。 */
+  function loadStationPhoto(img, stationIndex, onFail) {
+    var info = STATION_INFO[stationIndex];
+    if (!info || !info.photo) { if (onFail) onFail(); return; }
+    var urls = [];
+    var known = resolvedPhotoUrls[stationIndex];
+    if (known) urls.push(known);
+    if (urls.indexOf(info.photo) < 0) urls.push(info.photo);
+    var fb = photoFallbackUrl(info);
+    if (fb && urls.indexOf(fb) < 0) urls.push(fb);
+    var i = 0;
+    function tryNext() {
+      if (i >= urls.length) {
+        img.onload = null; img.onerror = null;
+        if (onFail) onFail();
+        return;
+      }
+      var url = urls[i++];
+      img.onerror = function () { tryNext(); };
+      img.onload = function () {
+        img.onload = null; img.onerror = null;
+        resolvedPhotoUrls[stationIndex] = url;
+      };
+      img.src = url;
+    }
+    tryNext();
+  }
+
+  /* 次にポップアップで表示される駅の写真を先行ロードして温めておく。
+     保持は次の駅1件分だけ：対象は設定画面では開始駅（プルダウンの選択駅）、
+     ウォーク中は現在の目標駅。対象が変わったら前の先行ロードは破棄する
+     （ハンドラを外して参照を手放す）。 */
+  function preloadUpcomingPhoto() {
+    var stationIndex = null;
+    if (session.status === "idle") {
+      stationIndex = settingsStartIndex;
+    } else if (session.status === "walking") {
+      var order = currentOrder();
+      stationIndex = order[session.targetOffset] != null ? order[session.targetOffset] : session.startIndex;
+    } else if (session.status === "finished") {
+      // ゴール時のポップアップ（開始駅）も温めておく
+      stationIndex = session.startIndex;
+    }
+    if (stationIndex == null) { photoPreload = null; return; }
+    if (photoPreload && photoPreload.stationIndex === stationIndex) return;
+    if (photoPreload && photoPreload.img) { photoPreload.img.onload = null; photoPreload.img.onerror = null; }
+    var img = new Image();
+    photoPreload = { stationIndex: stationIndex, img: img };
+    loadStationPhoto(img, stationIndex, function () {
+      if (photoPreload && photoPreload.img === img) photoPreload.img = null;
+    });
+  }
+
   /* ---------- 駅ポップアップ ---------- */
   function openTriviaPopup(stationIndex, offset, isStart) {
     var st = STATIONS[stationIndex];
@@ -2267,23 +2338,13 @@
     var img = $("triviaImg");
     img.alt = st.name + "駅の写真";
     img.classList.remove("hidden");
-    /* 写真は同梱ファイル（assets/stations/…）から読み込むのが基本。
-       単体ファイルとして配信される環境（GitHub Pages 等、同梱ファイルが
-       置かれていない場所）では読み込みに失敗するため、その場合は
-       Wikimedia Commons の元画像（出典ページのファイル）へ切り替える。
+    /* 写真は先行ロードと同じ解決経路（loadStationPhoto）で読み込む。
+       先行ロードで解決済みの駅は最終URLを直接読み込むので即表示され、
        どちらも失敗したら写真欄を隠す（壊れた画像アイコンを出さない）。 */
-    img.onerror = function () {
-      img.onerror = null;
-      var m = /\/File:([^/?#]+)/.exec((info.photoCredit && info.photoCredit.sourceUrl) || "");
-      if (m) {
-        img.onerror = function () { img.onerror = null; img.classList.add("hidden"); };
-        img.src = "https://commons.wikimedia.org/wiki/Special:FilePath/" + m[1] + "?width=1024";
-      } else {
-        img.removeAttribute("src");
-        img.classList.add("hidden");
-      }
-    };
-    img.src = info.photo;
+    loadStationPhoto(img, stationIndex, function () {
+      img.removeAttribute("src");
+      img.classList.add("hidden");
+    });
     $("triviaTitle").textContent = isStart ? st.name + "駅からスタート！" : st.name + "駅に到着！";
     $("triviaText").textContent = trivia;
     $("triviaSourceLink").href = info.triviaSourceUrl;
