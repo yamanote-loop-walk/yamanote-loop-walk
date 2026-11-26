@@ -1445,16 +1445,6 @@
     }
     return null;
   }
-  function firstLabelLayerId(map) {
-    try {
-      var layers = map.getStyle().layers || [];
-      for (var i = 0; i < layers.length; i++) {
-        var l = layers[i];
-        if (l.type === "symbol" && l.layout && l.layout["text-field"]) return l.id;
-      }
-    } catch (e) {}
-    return undefined;
-  }
   function applyMapUpdate(options) {
     var map = rawMap;
     if (!map) return;
@@ -1462,7 +1452,6 @@
     lastOverlayIds = overlays.map(function (ov) { return ov.id; });
     lastAppliedOverlays = overlays;
     var nextIds = {};
-    var anchorId = firstLabelLayerId(map);
     overlays.forEach(function (ov) {
       nextIds[ov.id] = true;
       try {
@@ -1472,16 +1461,18 @@
         } else if (!src) {
           map.addSource(ov.id, { type: "geojson", data: ov.data });
         }
-        // ソースだけでなくレイヤーの存在も毎回保証する。React 側の追加が
-        // 失敗した場合や、ベーススタイルの再読込でレイヤーが消えた場合でも、
-        // ここで作り直さないと現在地ドットなどが二度と描かれない。
+        // ソースだけでなくレイヤーの存在も毎回保証する。ベーススタイルの
+        // 再読込でレイヤーが消えた場合でも、ここで作り直さないとルート線や
+        // 現在地ドットが二度と描かれない。挿入位置はアンカーに頼らず、
+        // 現在地が正しく表示できている経路と同じ「スタイルスタックの
+        // 最前面へ積む」方式にする（重畳の確定は enforceOverlayOrder）。
         (ov.layers || []).forEach(function (layer) {
           try {
             if (map.getLayer(layer.id)) return;
             var spec = {};
             for (var k in layer) spec[k] = layer[k];
             spec.source = ov.id;
-            try { map.addLayer(spec, anchorId); } catch (e2) { try { map.addLayer(spec); } catch (e3) {} }
+            try { map.addLayer(spec); } catch (e2) {}
           } catch (e4) {}
         });
         adapterOverlayLayers[ov.id] = (ov.layers || []).map(function (l) { return l.id; });
@@ -1511,46 +1502,51 @@
     }
   }
   /* ---------- 重畳（描画順）の確定 ----------
-     マウント時に React 側が入れたレイヤーと、後からアダプタが足した
-     レイヤー（現在地・扇形など）では挿入位置の基準が違い、現在地だけが
-     ベースマップの道路や塗りの下に潜って「マップの裏」にあるように
-     見えることがある。そこで更新のたびに、全オーバーレイを配列順
-     （1周ライン→到達済み→GPS軌跡→次の区間→扇形→現在地ドット）の
-     ままラベルレイヤーの直下へ並べ直し、現在地系（扇形→ハロー→
-     ドット）は最前面へ持ってくる。アンカー（最初のラベルレイヤー）が
-     取得できない場合は、全オーバーレイを末尾（最前面側）へ並べる。
-     これにより重畳は下から「ベースマップ → ルート → 自分（扇形・
-     ドット）」になる。マップ標準の拡縮・コンパス等のコントロールは
-     マップ本体の DOM がそのまま担うので、DOM オーバーレイで覆う
-     キャンバス方式と違い、ボタンが押せなくなることはない。        */
-  var TOP_OVERLAY_IDS = ["route-heading", "route-myloc"]; // 最前面に置くオーバーレイ
+     【なぜ従来の moveLayer が効かなかったか（切り分け結果）】
+     対象インスタンスの同一性には問題がなかった（findRawMap が返す
+     selection.map は描画中の実 MapLibre そのもの）。問題は所有権の
+     二重化だった。マウント時に同じオーバーレイ一式を HatchMaps
+     （React）にも渡していたため、各レイヤーは React がベース
+     スタイルの挿入点 insert-here（道路・塗りより下）へ作成済みで、
+     アダプタは「レイヤーが既にある」と判断して自前では作らず、
+     moveLayer の並べ替えだけに頼っていた。スタイル再読込や React の
+     再レンダリングで React 側がレイヤーを insert-here へ再挿入すると
+     並べ替えは上書きされ、ルートは道路の下へ戻る。再挿入のタイミング
+     と並べ替えが競合し、後勝ちが安定しなかったのが実態で、エラーは
+     全面 try/catch で握り潰されていたため無音で失敗していた。
+     一方、現在地（扇形・ドット）が正しく「マップの上・ボタンの下」に
+     見えていたのは、アダプタがアニメーションのたびに自前ソースへ
+     setData し、最前面へ寄せる経路が繰り返し効いていたため。
+
+     【現在の方式：所有権の分離＋現在地と同じ経路】
+     マウント時に HatchMaps へは overlays: [] を渡し、ルートと現在地の
+     ソース／レイヤーはアダプタだけが実 MapLibre へ直接 addSource /
+     addLayer する。並べ替えもアンカー（ラベルレイヤー）には頼らず、
+     現在地で実績のある「moveLayer でスタイルスタックの最前面へ積む」
+     方式に統一する：オーバーレイ配列の順（1周ライン→到達済み→
+     GPS軌跡→次の区間→扇形→現在地ドット）に1つずつ最前面へ移すと、
+     先に移したものほど下に残り、重畳は下から「ベースマップ →
+     ルート → 自分（扇形・ドット）」で確定する。React 側はこれらの
+     レイヤーを一切知らないので、再挿入で上書きされることもない。
+     マップ標準の拡縮・コンパス等のコントロールはマップ本体の DOM が
+     そのまま担うので、キャンバス方式と違いボタンが押せなくなる
+     こともない。                                                        */
   function enforceOverlayOrder() {
     var map = rawMap;
     if (!map || lastAppliedOverlays.length === 0) return;
     try {
-      var anchorId = firstLabelLayerId(map);
       lastAppliedOverlays.forEach(function (ov) {
         (ov.layers || []).forEach(function (layer) {
-          try { if (map.getLayer(layer.id)) map.moveLayer(layer.id, anchorId); } catch (e) {}
-        });
-      });
-      TOP_OVERLAY_IDS.forEach(function (oid) {
-        lastAppliedOverlays.forEach(function (ov) {
-          if (ov.id !== oid) return;
-          (ov.layers || []).forEach(function (layer) {
-            try { if (map.getLayer(layer.id)) map.moveLayer(layer.id); } catch (e) {}
-          });
+          try { if (map.getLayer(layer.id)) map.moveLayer(layer.id); } catch (e) {}
         });
       });
     } catch (e) {}
   }
-  // ベーススタイルが再読み込みされると、React 側は style.load の
-  // タイミングで全オーバーレイを挿入基準レイヤー（insert-here）の
-  // 位置へ入れ直す。その深さはベースマップの道路・塗りより下に
-  // なることがあり、ルート線が「マップの裏」に戻ってしまう。
-  // React 側の再追加（同じ style.load で先に登録されている）より
-  // 後に強制再同期をかけ、ルート線を含む全オーバーレイの重畳を
-  // こちらで確定し直す。
+  // ベーススタイルが再読み込み（setStyle）されると、アダプタ所有の
+  // カスタムソース／レイヤーはスタイルごと消える。React 側はもう
+  // オーバーレイを持っていないので再追加してくれる者はいない。
+  // style.load の後にアダプタ自身が強制再同期をかけ、ソース／
+  // レイヤーの再追加と重畳の再確定までを自前で完結させる。
   var styleHookInstalled = false;
   function installStyleReloadHook() {
     if (styleHookInstalled || !rawMap || typeof rawMap.on !== "function") return;
@@ -1573,6 +1569,13 @@
         return;
       }
       var handle = window.HatchMaps.mountMap(el, Object.assign(buildMapOptions(true, false), {
+        // 所有権の分離：ルートと現在地のオーバーレイは HatchMaps（React）には
+        // 一切渡さない。React 側はオーバーレイをベーススタイルの挿入点
+        // （insert-here、道路より下）へ入れるため、同じIDのレイヤーを両者が
+        // 持つと、スタイル再読込や React の再挿入のたびにルートが道路の下へ
+        // 戻ってしまう。実 MapLibre への addSource/addLayer・setData・
+        // style.load 時の再追加は、すべて下のアダプタが単独で所有する。
+        overlays: [],
         clientId: "artifact_web",
         onFatalError: function () { mapUnavailable = true; mapLoaded = false; renderMapBits(); },
       }));
