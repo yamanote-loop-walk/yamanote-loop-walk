@@ -310,12 +310,58 @@
       }
       .arrive-sparkle { position: absolute; bottom: 55%; font-size: 18px; line-height: 1; opacity: 0; animation: arrive-sparkle .9s ease-out forwards; }
       @keyframes balloon-attention {
-        0%, 100% { transform: translateY(0); box-shadow: 0 0 0 0 rgba(79,157,47,.45), 0 4px 10px -2px rgba(0,0,0,.18); }
-        50% { transform: translateY(-5px); box-shadow: 0 0 0 9px rgba(79,157,47,0), 0 12px 18px -6px rgba(0,0,0,.22); }
+        0%, 100% {
+          transform: translateY(0) scale(1);
+          border-color: rgba(109,190,69,.7);
+          box-shadow:
+            0 0 0 2px rgba(109,190,69,.45),
+            0 0 16px 3px rgba(109,190,69,.55),
+            0 0 34px 8px rgba(109,190,69,.30),
+            0 0 52px 12px rgba(242,169,0,.16),
+            0 4px 10px -2px rgba(0,0,0,.18);
+        }
+        50% {
+          transform: translateY(-5px) scale(1.02);
+          border-color: rgba(242,169,0,.95);
+          box-shadow:
+            0 0 0 3px rgba(109,190,69,.9),
+            0 0 26px 8px rgba(109,190,69,.85),
+            0 0 54px 16px rgba(109,190,69,.48),
+            0 0 78px 22px rgba(242,169,0,.38),
+            0 0 0 18px rgba(109,190,69,0),
+            0 14px 22px -6px rgba(0,0,0,.24);
+        }
       }
-      .balloon-attention { animation: balloon-attention 1.6s ease-in-out infinite; }
+      @keyframes balloon-halo {
+        0%, 100% { opacity: .45; transform: scale(.97); }
+        50% { opacity: 1; transform: scale(1.08); }
+      }
+      @keyframes balloon-shine {
+        0% { background-position: 130% 0; }
+        55%, 100% { background-position: -130% 0; }
+      }
+      .balloon-attention {
+        border-width: 2px;
+        animation: balloon-attention 1.6s ease-in-out infinite;
+      }
+      .balloon-attention::before {
+        content: ""; position: absolute; inset: -10px; z-index: -1; pointer-events: none;
+        border-radius: 24px;
+        background: radial-gradient(ellipse at center, transparent 52%, rgba(109,190,69,.5) 72%, rgba(242,169,0,.28) 88%, transparent 100%);
+        filter: blur(10px);
+        animation: balloon-halo 1.6s ease-in-out infinite;
+      }
+      .balloon-attention::after {
+        content: ""; position: absolute; inset: 0; pointer-events: none;
+        border-radius: inherit;
+        background: linear-gradient(115deg, transparent 32%, rgba(255,255,255,.38) 47%, rgba(255,238,170,.55) 52%, transparent 68%);
+        background-size: 260% 100%;
+        background-repeat: no-repeat;
+        animation: balloon-shine 2.4s ease-in-out infinite;
+      }
+      .balloon-attention .tail { border-color: rgba(109,190,69,.8); }
       @media (prefers-reduced-motion: reduce) {
-        .arrive-reveal, .arrive-reveal-text, .arrive-sparkle, .balloon-attention { animation: none; }
+        .arrive-reveal, .arrive-reveal-text, .arrive-sparkle, .balloon-attention, .balloon-attention::before, .balloon-attention::after { animation: none; }
       }
     </style>
   </head>
@@ -330,13 +376,13 @@
           <button type="button" id="btnModeMap" aria-pressed="false">MAP</button>
           <button type="button" id="btnModeUi" class="on" aria-pressed="true">MENU</button>
         </div>
-        <div class="guide-balloon hidden" id="mapModeGuide">
+        <div class="guide-balloon balloon-attention hidden" id="mapModeGuide">
           <span class="tail" aria-hidden="true"></span>
           <p>ここのボタンでメイン画面を切り替えることができます</p>
           <div class="close-row"><button type="button" class="close-btn" id="mapModeGuideClose">閉じる</button></div>
         </div>
         <div class="unlock-wrap hidden" id="unlockWrap">
-          <div class="guide-balloon hidden" id="touchGuide">
+          <div class="guide-balloon balloon-attention hidden" id="touchGuide">
             <span class="tail" aria-hidden="true"></span>
             <p>現在地表示中は、この<svg width="14" height="14" viewBox="0 0 36 36" fill="currentColor" aria-hidden="true" style="display:inline-block;vertical-align:-2px;margin:0 2px"><path d="M30 20.145s.094-2.362-1.791-3.068c-1.667-.625-2.309.622-2.309.622s.059-1.913-1.941-2.622c-1.885-.667-2.75.959-2.75.959s-.307-1.872-2.292-2.417C17.246 13.159 16 14.785 16 14.785V2.576C16 1.618 15.458.001 13.458 0S11 1.66 11 2.576v20.5c0 1-1 1-1 0V20.41c0-3.792-2.037-6.142-2.75-6.792-.713-.65-1.667-.98-2.82-.734-1.956.416-1.529 1.92-.974 3.197 1.336 3.078 2.253 7.464 2.533 9.538.79 5.858 5.808 10.375 11.883 10.381 6.626.004 12.123-5.298 12.128-11.924v-3.931z"/></svg>ボタンを押すとマップの操作が有効になります</p>
             <label><input type="checkbox" id="touchGuideDontShow" />次回から表示しない</label>
